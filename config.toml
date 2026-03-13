@@ -5,4 +5,5 @@ timeout = 1.0
 
 [bluetooth]
 device_name = "OpenRun Pro 2"
+device_mac = "A8:F5:E1:C9:C9:DC"
 poll_interval = 5

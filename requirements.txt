@@ -1,2 +1,6 @@
 icmplib
 PySide6
+winrt-Windows.Devices.Bluetooth
+winrt-Windows.Devices.Radios
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections

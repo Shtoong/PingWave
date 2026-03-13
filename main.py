@@ -1,7 +1,6 @@
 import sys
 import time
-import subprocess
-import json
+import asyncio
 import tomllib
 from pathlib import Path
 from collections import deque
@@ -35,6 +34,7 @@ ICMP_TIMEOUT = _ping_cfg.get("timeout", 1.0)
 
 # --- Bluetooth ---
 BT_DEVICE_NAME = _bt_cfg.get("device_name", "")
+BT_DEVICE_MAC = _bt_cfg.get("device_mac", "")
 BT_POLL_INTERVAL = _bt_cfg.get("poll_interval", 5)
 
 # --- Настройки окна (стартовые) ---
@@ -70,38 +70,52 @@ class BluetoothMonitor(QThread):
     # bt_on, device_connected, battery_percent (-1 = unknown)
     status_updated = Signal(bool, bool, int)
 
-    def __init__(self, device_name: str):
+    def __init__(self, device_mac: str):
         super().__init__()
-        self._device_name = device_name
-        self._ps_script = str(Path(__file__).parent / "bt_status.ps1")
+        self._mac_int = int(device_mac.replace(":", ""), 16)
 
     def run(self):
-        while not self.isInterruptionRequested():
-            bt_on, connected, battery = self._poll()
-            self.status_updated.emit(bt_on, connected, battery)
-            ms = BT_POLL_INTERVAL * 1000
-            while ms > 0 and not self.isInterruptionRequested():
-                step = min(500, ms)
-                self.msleep(int(step))
-                ms -= step
-
-    def _poll(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            result = subprocess.run(
-                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                 '-File', self._ps_script,
-                 '-DeviceName', self._device_name],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            data = json.loads(result.stdout.strip())
-            return (
-                bool(data.get('bt_on', False)),
-                bool(data.get('connected', False)),
-                int(data.get('battery', -1))
-            )
+            while not self.isInterruptionRequested():
+                bt_on, connected, battery = loop.run_until_complete(self._poll())
+                self.status_updated.emit(bt_on, connected, battery)
+                ms = BT_POLL_INTERVAL * 1000
+                while ms > 0 and not self.isInterruptionRequested():
+                    step = min(500, ms)
+                    self.msleep(int(step))
+                    ms -= step
+        finally:
+            loop.close()
+
+    async def _poll(self):
+        import winrt.windows.devices.radios as radios
+        import winrt.windows.devices.bluetooth as bt
+
+        bt_on = False
+        connected = False
+        battery = -1
+
+        try:
+            all_radios = await radios.Radio.get_radios_async()
+            for r in all_radios:
+                if r.kind == radios.RadioKind.BLUETOOTH:
+                    bt_on = (r.state == radios.RadioState.ON)
+                    break
         except Exception:
-            return False, False, -1
+            bt_on = True  # can't determine, assume on
+
+        if bt_on:
+            try:
+                device = await bt.BluetoothDevice.from_bluetooth_address_async(self._mac_int)
+                if device:
+                    connected = (device.connection_status == bt.BluetoothConnectionStatus.CONNECTED)
+                    device.close()
+            except Exception:
+                pass
+
+        return bt_on, connected, battery
 
 
 class PingerThread(QThread):
@@ -212,8 +226,8 @@ class PingWaveWidget(QWidget):
         self.thread.ping_result.connect(self.on_new_ping)
         self.thread.start()
 
-        if BT_DEVICE_NAME:
-            self.bt_monitor = BluetoothMonitor(BT_DEVICE_NAME)
+        if BT_DEVICE_MAC:
+            self.bt_monitor = BluetoothMonitor(BT_DEVICE_MAC)
             self.bt_monitor.status_updated.connect(self.on_bt_status)
             self.bt_monitor.start()
         else:
@@ -422,9 +436,10 @@ class PingWaveWidget(QWidget):
             bt_style.format(color="#4488FF" if bt_on else "#555")
         )
 
-        self.btn_headphone.setStyleSheet(
-            bt_style.format(color="#00FF00" if connected else "#555")
-        )
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        opacity_effect = QGraphicsOpacityEffect(self.btn_headphone)
+        opacity_effect.setOpacity(1.0 if connected else 0.3)
+        self.btn_headphone.setGraphicsEffect(opacity_effect)
 
         if battery >= 0:
             self.lbl_battery.setText(f"{battery}%")
