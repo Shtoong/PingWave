@@ -1,5 +1,9 @@
 import sys
 import time
+import subprocess
+import json
+import tomllib
+from pathlib import Path
 from collections import deque
 
 from icmplib import ping  # pip install icmplib
@@ -11,10 +15,27 @@ from PySide6.QtGui import (
     QShortcut, QKeySequence, QFont, QWheelEvent
 )
 
+# --- Загрузка конфига ---
+CONFIG_PATH = Path(__file__).parent / "config.toml"
+
+def load_config():
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
+    return {}
+
+_config = load_config()
+_ping_cfg = _config.get("ping", {})
+_bt_cfg = _config.get("bluetooth", {})
+
 # --- Настройки цели ---
-TARGET_HOST = "google.com"
-PING_INTERVAL = 0.5
-ICMP_TIMEOUT = 1.0
+TARGET_HOST = _ping_cfg.get("host", "google.com")
+PING_INTERVAL = _ping_cfg.get("interval", 0.5)
+ICMP_TIMEOUT = _ping_cfg.get("timeout", 1.0)
+
+# --- Bluetooth ---
+BT_DEVICE_NAME = _bt_cfg.get("device_name", "")
+BT_POLL_INTERVAL = _bt_cfg.get("poll_interval", 5)
 
 # --- Настройки окна (стартовые) ---
 START_WINDOW_SIZE = (300, 100)
@@ -43,6 +64,44 @@ FRAME_INTERVAL = 1.0 / FPS
 ALPHA_MIN = 50
 ALPHA_MAX = 255
 ALPHA_STEP = 15
+
+
+class BluetoothMonitor(QThread):
+    # bt_on, device_connected, battery_percent (-1 = unknown)
+    status_updated = Signal(bool, bool, int)
+
+    def __init__(self, device_name: str):
+        super().__init__()
+        self._device_name = device_name
+        self._ps_script = str(Path(__file__).parent / "bt_status.ps1")
+
+    def run(self):
+        while not self.isInterruptionRequested():
+            bt_on, connected, battery = self._poll()
+            self.status_updated.emit(bt_on, connected, battery)
+            ms = BT_POLL_INTERVAL * 1000
+            while ms > 0 and not self.isInterruptionRequested():
+                step = min(500, ms)
+                self.msleep(int(step))
+                ms -= step
+
+    def _poll(self):
+        try:
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                 '-File', self._ps_script,
+                 '-DeviceName', self._device_name],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            data = json.loads(result.stdout.strip())
+            return (
+                bool(data.get('bt_on', False)),
+                bool(data.get('connected', False)),
+                int(data.get('battery', -1))
+            )
+        except Exception:
+            return False, False, -1
 
 
 class PingerThread(QThread):
@@ -116,6 +175,25 @@ class PingWaveWidget(QWidget):
             "font-size: 12px; font-weight: bold;"
         )
 
+        bt_btn_style = (
+            "QPushButton {background: transparent; color: #555; "
+            "border: none; font-family: Consolas; font-size: 11px; font-weight: bold;}"
+            "QPushButton:hover {color: #FFFFFF;}"
+        )
+
+        self.lbl_battery = QLabel("—%", self)
+        self.lbl_battery.setStyleSheet(
+            "color: #888; font-family: Consolas; font-size: 11px;"
+        )
+
+        self.btn_headphone = QPushButton("🎧", self)
+        self.btn_headphone.setStyleSheet(bt_btn_style)
+        self.btn_headphone.setToolTip("Connect / Disconnect")
+
+        self.btn_bt = QPushButton("BT", self)
+        self.btn_bt.setStyleSheet(bt_btn_style)
+        self.btn_bt.setToolTip("Bluetooth On / Off")
+
         self.btn_close = QPushButton("×", self)
         self.btn_close.setStyleSheet(
             "QPushButton {background: transparent; color: #777; "
@@ -134,6 +212,13 @@ class PingWaveWidget(QWidget):
         self.thread.ping_result.connect(self.on_new_ping)
         self.thread.start()
 
+        if BT_DEVICE_NAME:
+            self.bt_monitor = BluetoothMonitor(BT_DEVICE_NAME)
+            self.bt_monitor.status_updated.connect(self.on_bt_status)
+            self.bt_monitor.start()
+        else:
+            self.bt_monitor = None
+
         self.frame_timer = QTimer(self)
         self.frame_timer.timeout.connect(self.on_frame)
         self.frame_timer.start(int(FRAME_INTERVAL * 1000))
@@ -144,7 +229,11 @@ class PingWaveWidget(QWidget):
         self._update_controls_pos()
 
     def _update_controls_pos(self):
-        self.btn_close.setGeometry(self.width() - 25, 5, 20, 20)
+        r = self.width()
+        r -= 25; self.btn_close.setGeometry(r, 5, 20, 20)
+        r -= 24; self.btn_bt.setGeometry(r, 5, 24, 20)
+        r -= 22; self.btn_headphone.setGeometry(r, 5, 22, 20)
+        r -= 34; self.lbl_battery.setGeometry(r, 5, 34, 20)
         self.sizegrip.move(self.width() - 16, self.height() - 16)
 
     def resizeEvent(self, event):
@@ -322,6 +411,36 @@ class PingWaveWidget(QWidget):
             self._update_graph_buffer()
             self.update()
 
+    def on_bt_status(self, bt_on: bool, connected: bool, battery: int):
+        bt_style = (
+            "QPushButton {{background: transparent; color: {color}; "
+            "border: none; font-family: Consolas; font-size: 11px; font-weight: bold;}}"
+            "QPushButton:hover {{color: #FFFFFF;}}"
+        )
+
+        self.btn_bt.setStyleSheet(
+            bt_style.format(color="#4488FF" if bt_on else "#555")
+        )
+
+        self.btn_headphone.setStyleSheet(
+            bt_style.format(color="#00FF00" if connected else "#555")
+        )
+
+        if battery >= 0:
+            self.lbl_battery.setText(f"{battery}%")
+            if battery > 50:
+                color = "#00FF00"
+            elif battery > 20:
+                color = "#FFCC00"
+            else:
+                color = "#FF4444"
+        else:
+            self.lbl_battery.setText("—%")
+            color = "#555"
+        self.lbl_battery.setStyleSheet(
+            f"color: {color}; font-family: Consolas; font-size: 11px;"
+        )
+
     def _color_for_value(self, v: float) -> QColor:
         if v < 0:
             return COLOR_BAD
@@ -396,6 +515,10 @@ class PingWaveWidget(QWidget):
         self.thread.requestInterruption()
         self.thread.quit()
         self.thread.wait(3000)
+        if self.bt_monitor:
+            self.bt_monitor.requestInterruption()
+            self.bt_monitor.quit()
+            self.bt_monitor.wait(3000)
         super().closeEvent(event)
 
 
