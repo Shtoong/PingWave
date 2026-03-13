@@ -7,7 +7,7 @@ from icmplib import ping  # pip install icmplib
 from PySide6.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QSizeGrip
 from PySide6.QtCore import QThread, Signal, Qt, QPoint, QTimer
 from PySide6.QtGui import (
-    QPainter, QColor, QBrush,
+    QPainter, QColor, QBrush, QPixmap,
     QShortcut, QKeySequence, QFont, QWheelEvent
 )
 
@@ -101,6 +101,12 @@ class PingWaveWidget(QWidget):
 
         self.last_real = None
 
+        self._graph_buf = QPixmap(self.width(), self.height())
+        self._graph_buf.fill(Qt.transparent)
+        self._buf_min = 0.0
+        self._buf_max = 100.0
+        self._buf_dirty = True
+
         self.lbl_status = QLabel(self)
         self.lbl_status.move(10, 5)
         self.lbl_status.resize(200, 20)
@@ -145,6 +151,9 @@ class PingWaveWidget(QWidget):
         new_width = event.size().width()
         if new_width != self.raw_len:
             self._resize_buffers(new_width)
+        self._graph_buf = QPixmap(event.size().width(), event.size().height())
+        self._graph_buf.fill(Qt.transparent)
+        self._buf_dirty = True
         self._update_controls_pos()
         super().resizeEvent(event)
 
@@ -166,6 +175,121 @@ class PingWaveWidget(QWidget):
             avg = sum(values) / len(values)
         self.smooth_data.append(avg)
 
+    def _calc_range(self):
+        raw_vals = [v for (v, _) in self.raw_data if v >= 0]
+        smooth_vals = [v for v in self.smooth_data if v >= 0]
+        candidates = raw_vals + smooth_vals
+        if candidates:
+            current_max = max(candidates)
+            current_min = min(candidates)
+            span = current_max - current_min
+            if span < 1.0:
+                span = 1.0
+            pad = span * 0.1
+            return max(0.0, current_min - pad), current_max + pad
+        return 0.0, 100.0
+
+    def _val_to_y(self, v, h):
+        padding_top = 30
+        padding_bottom = 10
+        graph_h = h - padding_top - padding_bottom
+        value_range = self._buf_max - self._buf_min
+        if value_range <= 0.001:
+            value_range = 1.0
+        if v < 0:
+            return h - padding_bottom
+        ratio = (v - self._buf_min) / value_range
+        ratio = max(0.0, min(1.0, ratio))
+        return (h - padding_bottom) - ratio * graph_h
+
+    def _redraw_full_buffer(self):
+        w = self._graph_buf.width()
+        h = self._graph_buf.height()
+        self._graph_buf.fill(Qt.transparent)
+
+        if not self.raw_data:
+            self._buf_dirty = False
+            return
+
+        painter = QPainter(self._graph_buf)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        start_x = w - len(self.raw_data)
+
+        for i, (v, is_real) in enumerate(self.raw_data):
+            if not is_real:
+                continue
+            x = start_x + i
+            if x < 0 or x > w:
+                continue
+            y = self._val_to_y(v, h)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(COLOR_RAW))
+            painter.drawEllipse(QPoint(int(x), int(y)),
+                                POINT_RADIUS_RAW, POINT_RADIUS_RAW)
+
+        if POINT_RADIUS_SMOOTH > 0:
+            m = len(self.smooth_data)
+            start_x_s = w - m
+            for i, avg in enumerate(self.smooth_data):
+                x = start_x_s + i
+                if x < 0 or x > w:
+                    continue
+                if avg < 0:
+                    continue
+                y = self._val_to_y(avg, h)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(self._color_for_value(avg)))
+                painter.drawEllipse(QPoint(int(x), int(y)),
+                                    POINT_RADIUS_SMOOTH, POINT_RADIUS_SMOOTH)
+
+        painter.end()
+        self._buf_dirty = False
+
+    def _scroll_and_draw_new(self):
+        w = self._graph_buf.width()
+        h = self._graph_buf.height()
+
+        shifted = QPixmap(w, h)
+        shifted.fill(Qt.transparent)
+        p = QPainter(shifted)
+        p.drawPixmap(-1, 0, self._graph_buf)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        if self.raw_data:
+            v, is_real = self.raw_data[-1]
+            if is_real:
+                y = self._val_to_y(v, h)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(COLOR_RAW))
+                p.drawEllipse(QPoint(w - 1, int(y)),
+                              POINT_RADIUS_RAW, POINT_RADIUS_RAW)
+
+        if POINT_RADIUS_SMOOTH > 0 and self.smooth_data:
+            avg = self.smooth_data[-1]
+            if avg >= 0:
+                y = self._val_to_y(avg, h)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(self._color_for_value(avg)))
+                p.drawEllipse(QPoint(w - 1, int(y)),
+                              POINT_RADIUS_SMOOTH, POINT_RADIUS_SMOOTH)
+
+        p.end()
+        self._graph_buf = shifted
+
+    def _update_graph_buffer(self):
+        min_val, max_val = self._calc_range()
+
+        if abs(min_val - self._buf_min) > 0.01 or abs(max_val - self._buf_max) > 0.01:
+            self._buf_min = min_val
+            self._buf_max = max_val
+            self._buf_dirty = True
+
+        if self._buf_dirty:
+            self._redraw_full_buffer()
+        else:
+            self._scroll_and_draw_new()
+
     def on_new_ping(self, value: float):
         self.last_real = value
         self.raw_data.append((value, True))
@@ -184,7 +308,9 @@ class PingWaveWidget(QWidget):
                 f"color: {color.name()}; font-family: Consolas; "
                 "font-size: 12px; font-weight: bold;"
             )
-        self.update()
+        if self.isVisible():
+            self._update_graph_buffer()
+            self.update()
 
     def on_frame(self):
         if self.last_real is None:
@@ -192,7 +318,9 @@ class PingWaveWidget(QWidget):
         last_val = self.raw_data[-1][0] if self.raw_data else self.last_real
         self.raw_data.append((last_val, False))
         self._append_smooth_for_last_raw()
-        self.update()
+        if self.isVisible():
+            self._update_graph_buffer()
+            self.update()
 
     def _color_for_value(self, v: float) -> QColor:
         if v < 0:
@@ -217,7 +345,6 @@ class PingWaveWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        w = self.width()
         h = self.height()
 
         bg = QColor(COLOR_BG)
@@ -226,73 +353,14 @@ class PingWaveWidget(QWidget):
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(self.rect(), 12, 12)
 
-        if not self.raw_data:
-            return
+        painter.drawPixmap(0, 0, self._graph_buf)
 
-        raw_vals = [v for (v, _) in self.raw_data if v >= 0]
-        smooth_vals = [v for v in self.smooth_data if v >= 0]
-        candidates = raw_vals + smooth_vals
-        if candidates:
-            current_max = max(candidates)
-            current_min = min(candidates)
-            span = current_max - current_min
-            if span < 1.0:
-                span = 1.0
-            pad = span * 0.1
-            max_val = current_max + pad
-            min_val = max(0.0, current_min - pad)
-        else:
-            max_val = 100.0
-            min_val = 0.0
-
-        padding_top = 30
-        padding_bottom = 10
-        graph_h = h - padding_top - padding_bottom
-        value_range = max_val - min_val
-        if value_range <= 0.001:
-            value_range = 1.0
-
-        start_x = w - len(self.raw_data)
-
-        for i, (v, is_real) in enumerate(self.raw_data):
-            if not is_real:
-                continue
-            x = start_x + i
-            if x < 0 or x > w:
-                continue
-            if v < 0:
-                y = h - padding_bottom
-            else:
-                ratio = (v - min_val) / value_range
-                ratio = max(0.0, min(1.0, ratio))
-                y = (h - padding_bottom) - ratio * graph_h
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(COLOR_RAW))
-            painter.drawEllipse(QPoint(int(x), int(y)),
-                                POINT_RADIUS_RAW, POINT_RADIUS_RAW)
-
-        if POINT_RADIUS_SMOOTH > 0:
-            m = len(self.smooth_data)
-            start_x_s = w - m
-            for i, avg in enumerate(self.smooth_data):
-                x = start_x_s + i
-                if x < 0 or x > w:
-                    continue
-                if avg < 0:
-                    continue
-                ratio = (avg - min_val) / value_range
-                ratio = max(0.0, min(1.0, ratio))
-                y = (h - padding_bottom) - ratio * graph_h
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(self._color_for_value(avg)))
-                painter.drawEllipse(QPoint(int(x), int(y)),
-                                    POINT_RADIUS_SMOOTH, POINT_RADIUS_SMOOTH)
-
-        font = QFont("Consolas", 8)
-        painter.setFont(font)
-        painter.setPen(COLOR_AXIS)
-        painter.drawText(4, h - padding_bottom - 1, f"{int(min_val)}")
-        painter.drawText(4, padding_top, f"{int(max_val)}")
+        if self.raw_data:
+            font = QFont("Consolas", 8)
+            painter.setFont(font)
+            painter.setPen(COLOR_AXIS)
+            painter.drawText(4, h - 10 - 1, f"{int(self._buf_min)}")
+            painter.drawText(4, 30, f"{int(self._buf_max)}")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -307,6 +375,10 @@ class PingWaveWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._old_pos = None
+
+    def showEvent(self, event):
+        self._buf_dirty = True
+        super().showEvent(event)
 
     # Колесо мыши: изменяем только альфу фона
     def wheelEvent(self, event: QWheelEvent):
