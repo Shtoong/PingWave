@@ -240,6 +240,7 @@ class PingWaveWidget(QWidget):
         super().__init__()
 
         self.setWindowTitle("PingWave")
+        self.setToolTip("Колёсико мыши — прозрачность\nПеретаскивание — перемещение")
         self.resize(*START_WINDOW_SIZE)
         self.setMinimumSize(150, 60)
 
@@ -285,16 +286,19 @@ class PingWaveWidget(QWidget):
         self.lbl_battery.setStyleSheet(
             "color: #888; font-family: Consolas; font-size: 11px;"
         )
+        self.lbl_battery.setToolTip("Заряд наушников")
 
         self.btn_headphone = QPushButton("🎧", self)
         self.btn_headphone.setStyleSheet(bt_btn_style)
-        self.btn_headphone.setToolTip("Connect / Disconnect")
+        self.btn_headphone.setToolTip("Подключить / Отключить наушники")
+        self.btn_headphone.setCursor(Qt.PointingHandCursor)
         self.btn_headphone.clicked.connect(self._on_headphone_click)
         self._bt_connected = False
 
         self.btn_bt = QPushButton("BT", self)
         self.btn_bt.setStyleSheet(bt_btn_style)
-        self.btn_bt.setToolTip("Bluetooth On / Off")
+        self.btn_bt.setToolTip("Включить / Выключить Bluetooth")
+        self.btn_bt.setCursor(Qt.PointingHandCursor)
         self.btn_bt.clicked.connect(self._on_bt_click)
 
         self.btn_close = QPushButton("×", self)
@@ -303,10 +307,14 @@ class PingWaveWidget(QWidget):
             "border: none; font-size: 16px; font-weight: bold;}"
             "QPushButton:hover {color: #FFFFFF;}"
         )
+        self.btn_close.setToolTip("Закрыть PingWave")
+        self.btn_close.setCursor(Qt.PointingHandCursor)
         self.btn_close.clicked.connect(self.close)
 
         self.sizegrip = QSizeGrip(self)
         self.sizegrip.setStyleSheet("QSizeGrip { width: 16px; height: 16px; }")
+        self.sizegrip.setToolTip("Изменить размер окна")
+        self.sizegrip.setCursor(Qt.SizeFDiagCursor)
 
         QShortcut(QKeySequence("Esc"), self, activated=self.close)
         QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.close)
@@ -624,9 +632,11 @@ class PingWaveWidget(QWidget):
         super().showEvent(event)
 
     # Колесо мыши: изменяем только альфу фона
+    def enterEvent(self, event):
+        self.activateWindow()
+        super().enterEvent(event)
+
     def wheelEvent(self, event: QWheelEvent):
-        if not self.isActiveWindow():
-            return
         delta = event.angleDelta().y()
         if delta == 0:
             return
