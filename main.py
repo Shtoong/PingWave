@@ -117,6 +117,25 @@ class BluetoothMonitor(QThread):
 
         return bt_on, connected, battery
 
+    def toggle_bt(self):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self._toggle_bt())
+        finally:
+            loop.close()
+
+    async def _toggle_bt(self):
+        import winrt.windows.devices.radios as radios
+        try:
+            all_radios = await radios.Radio.get_radios_async()
+            for r in all_radios:
+                if r.kind == radios.RadioKind.BLUETOOTH:
+                    new_state = radios.RadioState.OFF if r.state == radios.RadioState.ON else radios.RadioState.ON
+                    await r.set_state_async(new_state)
+                    break
+        except Exception:
+            pass
+
 
 class PingerThread(QThread):
     ping_result = Signal(float)
@@ -207,6 +226,7 @@ class PingWaveWidget(QWidget):
         self.btn_bt = QPushButton("BT", self)
         self.btn_bt.setStyleSheet(bt_btn_style)
         self.btn_bt.setToolTip("Bluetooth On / Off")
+        self.btn_bt.clicked.connect(self._on_bt_click)
 
         self.btn_close = QPushButton("×", self)
         self.btn_close.setStyleSheet(
@@ -424,6 +444,11 @@ class PingWaveWidget(QWidget):
         if self.isVisible():
             self._update_graph_buffer()
             self.update()
+
+    def _on_bt_click(self):
+        if self.bt_monitor:
+            import threading
+            threading.Thread(target=self.bt_monitor.toggle_bt, daemon=True).start()
 
     def on_bt_status(self, bt_on: bool, connected: bool, battery: int):
         bt_style = (
