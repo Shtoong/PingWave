@@ -73,14 +73,18 @@ class BluetoothMonitor(QThread):
     def __init__(self, device_mac: str):
         super().__init__()
         self._mac_int = int(device_mac.replace(":", ""), 16)
+        self._skip_polls = 0
 
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             while not self.isInterruptionRequested():
-                bt_on, connected, battery = loop.run_until_complete(self._poll())
-                self.status_updated.emit(bt_on, connected, battery)
+                if self._skip_polls > 0:
+                    self._skip_polls -= 1
+                else:
+                    bt_on, connected, battery = loop.run_until_complete(self._poll())
+                    self.status_updated.emit(bt_on, connected, battery)
                 ms = BT_POLL_INTERVAL * 1000
                 while ms > 0 and not self.isInterruptionRequested():
                     step = min(500, ms)
@@ -117,7 +121,70 @@ class BluetoothMonitor(QThread):
 
         return bt_on, connected, battery
 
+    def toggle_device(self, connected: bool):
+        self._skip_polls = 2
+        import ctypes
+        from ctypes import wintypes
+        import uuid
+
+        bthprops = ctypes.windll.LoadLibrary("bthprops.cpl")
+
+        class SYSTEMTIME(ctypes.Structure):
+            _fields_ = [
+                ("wYear", wintypes.WORD), ("wMonth", wintypes.WORD),
+                ("wDayOfWeek", wintypes.WORD), ("wDay", wintypes.WORD),
+                ("wHour", wintypes.WORD), ("wMinute", wintypes.WORD),
+                ("wSecond", wintypes.WORD), ("wMilliseconds", wintypes.WORD),
+            ]
+
+        class BLUETOOTH_ADDRESS(ctypes.Structure):
+            _fields_ = [("ullLong", ctypes.c_ulonglong)]
+
+        class BLUETOOTH_DEVICE_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("Address", BLUETOOTH_ADDRESS),
+                ("ulClassofDevice", ctypes.c_ulong),
+                ("fConnected", wintypes.BOOL),
+                ("fRemembered", wintypes.BOOL),
+                ("fAuthenticated", wintypes.BOOL),
+                ("stLastSeen", SYSTEMTIME),
+                ("stLastUsed", SYSTEMTIME),
+                ("szName", ctypes.c_wchar * 248),
+            ]
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        def make_guid(s):
+            u = uuid.UUID(s)
+            b = u.bytes_le
+            return GUID(
+                int.from_bytes(b[0:4], "little"),
+                int.from_bytes(b[4:6], "little"),
+                int.from_bytes(b[6:8], "little"),
+                (ctypes.c_ubyte * 8)(*b[8:16]),
+            )
+
+        di = BLUETOOTH_DEVICE_INFO()
+        di.dwSize = ctypes.sizeof(BLUETOOTH_DEVICE_INFO)
+        di.Address.ullLong = self._mac_int
+
+        flags = 0x01 if not connected else 0x00  # ENABLE if disconnected, DISABLE if connected
+        for guid_str in ("0000110B-0000-1000-8000-00805F9B34FB",   # A2DP Sink
+                         "0000111E-0000-1000-8000-00805F9B34FB"):   # HFP
+            guid = make_guid(guid_str)
+            bthprops.BluetoothSetServiceState(
+                None, ctypes.byref(di), ctypes.byref(guid), flags
+            )
+
     def toggle_bt(self):
+        self._skip_polls = 2
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(self._toggle_bt())
@@ -222,6 +289,8 @@ class PingWaveWidget(QWidget):
         self.btn_headphone = QPushButton("🎧", self)
         self.btn_headphone.setStyleSheet(bt_btn_style)
         self.btn_headphone.setToolTip("Connect / Disconnect")
+        self.btn_headphone.clicked.connect(self._on_headphone_click)
+        self._bt_connected = False
 
         self.btn_bt = QPushButton("BT", self)
         self.btn_bt.setStyleSheet(bt_btn_style)
@@ -447,10 +516,25 @@ class PingWaveWidget(QWidget):
 
     def _on_bt_click(self):
         if self.bt_monitor:
+            self._bt_on = not getattr(self, '_bt_on', True)
+            self.on_bt_status(self._bt_on, self._bt_connected, -1)
             import threading
             threading.Thread(target=self.bt_monitor.toggle_bt, daemon=True).start()
 
+    def _on_headphone_click(self):
+        if self.bt_monitor:
+            self._bt_connected = not self._bt_connected
+            self.on_bt_status(True, self._bt_connected, -1)
+            import threading
+            threading.Thread(
+                target=self.bt_monitor.toggle_device,
+                args=(not self._bt_connected,),
+                daemon=True,
+            ).start()
+
     def on_bt_status(self, bt_on: bool, connected: bool, battery: int):
+        self._bt_on = bt_on
+        self._bt_connected = connected
         bt_style = (
             "QPushButton {{background: transparent; color: {color}; "
             "border: none; font-family: Consolas; font-size: 11px; font-weight: bold;}}"
