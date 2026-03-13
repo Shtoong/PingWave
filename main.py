@@ -1,6 +1,5 @@
 import sys
 import time
-import os
 from collections import deque
 
 from icmplib import ping  # pip install icmplib
@@ -324,6 +323,7 @@ class PingWaveWidget(QWidget):
         self.frame_timer.stop()
         self.thread.requestInterruption()
         self.thread.quit()
+        self.thread.wait(3000)
         super().closeEvent(event)
 
 
@@ -331,5 +331,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = PingWaveWidget()
     window.show()
-    code = app.exec()
-    os._exit(code)
+    sys.exit(app.exec())
