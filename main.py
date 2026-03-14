@@ -66,6 +66,33 @@ ALPHA_MAX = 255
 ALPHA_STEP = 15
 
 
+def _read_bt_battery(mac_hex: str) -> int:
+    """Read BT headphone battery via PnP device property.
+
+    Finds BTHENUM HFP node ({0000111E}) matching the MAC,
+    reads DEVPKEY {104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2.
+    Returns battery 0-100, or -1 if unavailable.
+    """
+    import subprocess
+    cmd = (
+        f"Get-PnpDevice | Where-Object {{ $_.InstanceId -like '*0000111E*{mac_hex}*' }} |"
+        " ForEach-Object { (Get-PnpDeviceProperty -InstanceId $_.InstanceId"
+        " -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2').Data }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        val = result.stdout.strip()
+        if val.isdigit():
+            return int(val)
+    except Exception:
+        pass
+    return -1
+
+
 class BluetoothMonitor(QThread):
     # bt_on, device_connected, battery_percent (-1 = unknown)
     status_updated = Signal(bool, bool, int)
@@ -73,6 +100,7 @@ class BluetoothMonitor(QThread):
     def __init__(self, device_mac: str):
         super().__init__()
         self._mac_int = int(device_mac.replace(":", ""), 16)
+        self._mac_hex = device_mac.replace(":", "").upper()
         self._skip_polls = 0
 
     def run(self):
@@ -118,6 +146,12 @@ class BluetoothMonitor(QThread):
                     device.close()
             except Exception:
                 pass
+
+            if connected:
+                try:
+                    battery = _read_bt_battery(self._mac_hex)
+                except Exception:
+                    battery = -1
 
         return bt_on, connected, battery
 
