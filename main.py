@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QShortcut, QKeySequence, QFont, QWheelEvent, QAction,
 )
 
-# --- Загрузка конфига ---
+# --- Config ---
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 def load_config():
@@ -47,7 +47,7 @@ _config = load_config()
 _ping_cfg = _config.get("ping", {})
 _bt_cfg = _config.get("bluetooth", {})
 
-# --- Настройки цели ---
+# --- Ping settings ---
 TARGET_HOST = _ping_cfg.get("host", "google.com")
 PING_INTERVAL = _ping_cfg.get("interval", 0.5)
 ICMP_TIMEOUT = _ping_cfg.get("timeout", 1.0)
@@ -57,7 +57,7 @@ BT_DEVICE_NAME = _bt_cfg.get("device_name", "")
 BT_DEVICE_MAC = _bt_cfg.get("device_mac", "")
 BT_POLL_INTERVAL = _bt_cfg.get("poll_interval", 5)
 
-# --- Окно (сохранённые или дефолтные) ---
+# --- Window (saved or defaults) ---
 _win_cfg = _config.get("window", {})
 START_WINDOW_SIZE = (_win_cfg.get("width", 300), _win_cfg.get("height", 100))
 START_WINDOW_POS = (_win_cfg.get("x", 0), _win_cfg.get("y", 0))
@@ -74,7 +74,7 @@ COLOR_RAW  = QColor(150, 150, 150)
 
 COLOR_TEXT = QColor(180, 180, 180)
 COLOR_AXIS = QColor(150, 150, 170)
-COLOR_BG   = QColor(22, 22, 32, 230)  # фон сам по себе с альфой
+COLOR_BG   = QColor(22, 22, 32, 230)
 
 PING_LOW  = 50.0
 PING_MED  = 200.0
@@ -83,7 +83,7 @@ PING_HIGH = 250.0
 FPS = 10
 FRAME_INTERVAL = 1.0 / FPS
 
-# Прозрачность фона (НЕ окна)
+# Background alpha range
 ALPHA_MIN = 50
 ALPHA_MAX = 255
 ALPHA_STEP = 15
@@ -450,7 +450,7 @@ class LoadingDialog(QDialog):
         self._spinner_angle = 0
         lay.addWidget(self._spinner_label)
 
-        msg = QLabel("Получаем Bluetooth устройства...")
+        msg = QLabel("Loading Bluetooth devices...")
         msg.setStyleSheet(
             "color: #B4B4B4; font-family: Consolas; font-size: 12px;"
         )
@@ -497,7 +497,7 @@ class LoadingDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, bt_devices=None):
         super().__init__(parent)
-        self.setWindowTitle("PingWave — Настройки")
+        self.setWindowTitle("PingWave — Settings")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedWidth(440)
@@ -517,7 +517,7 @@ class SettingsDialog(QDialog):
         form.setSpacing(10)
 
         # Title
-        title = QLabel("Настройки")
+        title = QLabel("Settings")
         title.setStyleSheet("color: #00FF00; font-size: 14px; font-weight: bold;")
         form.addRow(title)
 
@@ -525,7 +525,7 @@ class SettingsDialog(QDialog):
         self.combo_bt = QComboBox()
         self.combo_bt.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.combo_bt.setMinimumWidth(280)
-        self.combo_bt.addItem("(нет)", "")
+        self.combo_bt.addItem("(none)", "")
         self._bt_devices = sorted(bt_devices or [], key=lambda x: x[0].lower())
         current_mac = BT_DEVICE_MAC.upper().replace(":", "")
         selected_idx = 0
@@ -533,7 +533,7 @@ class SettingsDialog(QDialog):
             if connected and bat >= 0:
                 bat_str = f"  {bat}%"
             elif has_hfp:
-                bat_str = "  (бат.)"
+                bat_str = "  (bat.)"
             else:
                 bat_str = ""
             label = f"{name}  [{mac}]{bat_str}"
@@ -550,11 +550,11 @@ class SettingsDialog(QDialog):
             if mac.replace(":", "") == current_mac:
                 selected_idx = i + 1
         self.combo_bt.setCurrentIndex(selected_idx)
-        form.addRow("Наушники:", self.combo_bt)
+        form.addRow("Headphones:", self.combo_bt)
 
         # Ping host
         self.edit_host = QLineEdit(TARGET_HOST)
-        form.addRow("Хост пинга:", self.edit_host)
+        form.addRow("Ping host:", self.edit_host)
 
         # Ping interval with +/- buttons
         interval_row = QHBoxLayout()
@@ -582,10 +582,10 @@ class SettingsDialog(QDialog):
         btn_plus.clicked.connect(lambda: self._adjust_interval(0.1))
         interval_row.addWidget(btn_plus)
         interval_row.addStretch()
-        form.addRow("Интервал (сек):", interval_row)
+        form.addRow("Interval (sec):", interval_row)
 
         # Checkbox: save window position
-        self.chk_save_pos = QCheckBox("Сохранить позицию и размер окна")
+        self.chk_save_pos = QCheckBox("Save window position and size")
         self.chk_save_pos.setStyleSheet(
             "QCheckBox { color: #888; font-size: 11px; }"
             "QCheckBox::indicator { width: 14px; height: 14px; }"
@@ -598,20 +598,20 @@ class SettingsDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        btn_reset = QPushButton("По умолчанию")
+        btn_reset = QPushButton("Defaults")
         btn_reset.setObjectName("btnCancel")
-        btn_reset.setToolTip("Сбросить все настройки")
+        btn_reset.setToolTip("Reset all settings to defaults")
         btn_reset.clicked.connect(self._on_reset)
         btn_row.addWidget(btn_reset)
 
         btn_row.addStretch()
 
-        btn_cancel = QPushButton("Отмена")
+        btn_cancel = QPushButton("Cancel")
         btn_cancel.setObjectName("btnCancel")
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
 
-        btn_save = QPushButton("Сохранить")
+        btn_save = QPushButton("Save")
         btn_save.clicked.connect(self._on_save)
         btn_row.addWidget(btn_save)
 
@@ -648,8 +648,8 @@ class SettingsDialog(QDialog):
 
     def _on_reset(self):
         msg = QMessageBox(self)
-        msg.setWindowTitle("Сброс настроек")
-        msg.setText("Сбросить все настройки по умолчанию?")
+        msg.setWindowTitle("Reset settings")
+        msg.setText("Reset all settings to defaults?")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.No)
         msg.setStyleSheet(
@@ -663,14 +663,14 @@ class SettingsDialog(QDialog):
         )
         if msg.exec() != QMessageBox.Yes:
             return
-        # Сбросить окно родителя
+        # Reset parent window
         p = self.parent()
         if p:
             p.move(0, 0)
             p.resize(300, 100)
             p.current_alpha = 230
             p.update()
-        # Сохранить дефолтный конфиг (без секции window)
+        # Save default config (no window section)
         cfg = {
             "ping": {"host": "google.com", "interval": 0.5, "timeout": 1.0},
             "bluetooth": {"device_name": "", "device_mac": "", "poll_interval": 5},
@@ -741,7 +741,7 @@ class PingWaveWidget(QWidget):
         super().__init__()
 
         self.setWindowTitle("PingWave")
-        self.setToolTip("Колёсико мыши — прозрачность\nПеретаскивание — перемещение")
+        self.setToolTip("Mouse wheel — opacity\nDrag — move window")
         self.resize(*START_WINDOW_SIZE)
         self.setMinimumSize(150, 60)
 
@@ -752,7 +752,7 @@ class PingWaveWidget(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-        # Прозрачность фона (из конфига или дефолт)
+        # Background alpha (from config or default)
         self.current_alpha = START_ALPHA
         self.setWindowOpacity(1.0)
 
@@ -787,18 +787,18 @@ class PingWaveWidget(QWidget):
         self.lbl_battery.setStyleSheet(
             "color: #888; font-family: Consolas; font-size: 11px;"
         )
-        self.lbl_battery.setToolTip("Заряд наушников")
+        self.lbl_battery.setToolTip("Headphone battery")
 
         self.btn_headphone = QPushButton("🎧", self)
         self.btn_headphone.setStyleSheet(bt_btn_style)
-        self.btn_headphone.setToolTip("Подключить / Отключить наушники")
+        self.btn_headphone.setToolTip("Connect / Disconnect headphones")
         self.btn_headphone.setCursor(Qt.PointingHandCursor)
         self.btn_headphone.clicked.connect(self._on_headphone_click)
         self._bt_connected = False
 
         self.btn_bt = QPushButton("BT", self)
         self.btn_bt.setStyleSheet(bt_btn_style)
-        self.btn_bt.setToolTip("Включить / Выключить Bluetooth")
+        self.btn_bt.setToolTip("Toggle Bluetooth on / off")
         self.btn_bt.setCursor(Qt.PointingHandCursor)
         self.btn_bt.clicked.connect(self._on_bt_click)
 
@@ -808,13 +808,13 @@ class PingWaveWidget(QWidget):
             "border: none; font-family: Consolas; font-size: 14px; font-weight: bold;}"
             "QPushButton:hover {color: #FFFFFF;}"
         )
-        self.btn_close.setToolTip("Закрыть PingWave")
+        self.btn_close.setToolTip("Close PingWave")
         self.btn_close.setCursor(Qt.PointingHandCursor)
         self.btn_close.clicked.connect(self.close)
 
         self.sizegrip = QSizeGrip(self)
         self.sizegrip.setStyleSheet("QSizeGrip { width: 16px; height: 16px; }")
-        self.sizegrip.setToolTip("Изменить размер окна")
+        self.sizegrip.setToolTip("Resize window")
         self.sizegrip.setCursor(Qt.SizeFDiagCursor)
 
         QShortcut(QKeySequence("Esc"), self, activated=self.close)
@@ -847,9 +847,9 @@ class PingWaveWidget(QWidget):
             " border: 1px solid #333; font-family: Consolas; font-size: 12px; }"
             "QMenu::item:selected { background-color: #00AA00; color: #000; }"
         )
-        act_settings = menu.addAction("Настройки...")
+        act_settings = menu.addAction("Settings...")
         menu.addSeparator()
-        act_close = menu.addAction("Закрыть")
+        act_close = menu.addAction("Close")
         action = menu.exec(event.globalPos())
         if action == act_settings:
             self._open_settings()
@@ -1231,7 +1231,7 @@ class PingWaveWidget(QWidget):
         self._buf_dirty = True
         super().showEvent(event)
 
-    # Колесо мыши: изменяем только альфу фона
+    # Mouse wheel: change background alpha
     def enterEvent(self, event):
         self.activateWindow()
         super().enterEvent(event)
@@ -1260,6 +1260,11 @@ class PingWaveWidget(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet(
+        "QToolTip { background-color: #1E1E2A; color: #B4B4B4;"
+        " border: 1px solid #333; font-family: Consolas; font-size: 12px;"
+        " padding: 4px; }"
+    )
     window = PingWaveWidget()
     window.show()
     sys.exit(app.exec())
