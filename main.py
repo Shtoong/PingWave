@@ -338,7 +338,7 @@ class PingWaveWidget(QWidget):
         self.btn_close = QPushButton("×", self)
         self.btn_close.setStyleSheet(
             "QPushButton {background: transparent; color: #777; "
-            "border: none; font-size: 16px; font-weight: bold;}"
+            "border: none; font-family: Consolas; font-size: 14px; font-weight: bold;}"
             "QPushButton:hover {color: #FFFFFF;}"
         )
         self.btn_close.setToolTip("Закрыть PingWave")
@@ -374,11 +374,18 @@ class PingWaveWidget(QWidget):
         self._update_controls_pos()
 
     def _update_controls_pos(self):
-        r = self.width()
-        r -= 25; self.btn_close.setGeometry(r, 5, 20, 20)
-        r -= 24; self.btn_bt.setGeometry(r, 5, 24, 20)
-        r -= 22; self.btn_headphone.setGeometry(r, 5, 22, 20)
-        r -= 34; self.lbl_battery.setGeometry(r, 5, 34, 20)
+        top = 5
+        h = 20
+        gap = 2
+        r = self.width() - 6
+        # All items: same height, uniform gap, right-aligned
+        w_close = 20;  r -= w_close; self.btn_close.setGeometry(r, top, w_close, h)
+        r -= gap
+        w_bt = 22;     r -= w_bt;    self.btn_bt.setGeometry(r, top, w_bt, h)
+        r -= gap
+        w_hp = 20;     r -= w_hp;    self.btn_headphone.setGeometry(r, top, w_hp, h)
+        r -= gap
+        w_bat = 32;    r -= w_bat;   self.lbl_battery.setGeometry(r, top, w_bat, h)
         self.sizegrip.move(self.width() - 16, self.height() - 16)
 
     def resizeEvent(self, event):
@@ -594,12 +601,20 @@ class PingWaveWidget(QWidget):
 
         if battery >= 0:
             self.lbl_battery.setText(f"{battery}%")
-            if battery > 50:
-                color = "#00FF00"
-            elif battery > 20:
-                color = "#FFCC00"
+            # Gradient: 100%=#00FF00, 50%=#FFCC00, 10%=#FF4444, <10%=#FF4444
+            if battery >= 50:
+                t = (battery - 50) / 50.0  # 1.0 at 100%, 0.0 at 50%
+                r = int(255 * (1 - t))
+                g = int(255 * t + 204 * (1 - t))
+                b = 0
+            elif battery >= 10:
+                t = (battery - 10) / 40.0  # 1.0 at 50%, 0.0 at 10%
+                r = 255
+                g = int(204 * t + 68 * (1 - t))
+                b = int(68 * (1 - t))
             else:
-                color = "#FF4444"
+                r, g, b = 255, 68, 68
+            color = f"#{r:02X}{g:02X}{b:02X}"
         else:
             self.lbl_battery.setText("—%")
             color = "#555"
