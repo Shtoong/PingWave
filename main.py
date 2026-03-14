@@ -7,11 +7,15 @@ from collections import deque
 
 from icmplib import ping  # pip install icmplib
 
-from PySide6.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QSizeGrip
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QSizeGrip,
+    QDialog, QComboBox, QLineEdit, QCheckBox, QFormLayout, QHBoxLayout,
+    QVBoxLayout, QMenu, QMessageBox,
+)
 from PySide6.QtCore import QThread, Signal, Qt, QPoint, QTimer
 from PySide6.QtGui import (
     QPainter, QColor, QBrush, QPixmap,
-    QShortcut, QKeySequence, QFont, QWheelEvent
+    QShortcut, QKeySequence, QFont, QWheelEvent, QAction,
 )
 
 # --- Загрузка конфига ---
@@ -22,6 +26,22 @@ def load_config():
         with open(CONFIG_PATH, "rb") as f:
             return tomllib.load(f)
     return {}
+
+def save_config(cfg: dict):
+    lines = []
+    for section, values in cfg.items():
+        lines.append(f"[{section}]")
+        for k, v in values.items():
+            if isinstance(v, str):
+                lines.append(f'{k} = "{v}"')
+            elif isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, float):
+                lines.append(f"{k} = {v}")
+            elif isinstance(v, int):
+                lines.append(f"{k} = {v}")
+        lines.append("")
+    CONFIG_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 _config = load_config()
 _ping_cfg = _config.get("ping", {})
@@ -37,8 +57,11 @@ BT_DEVICE_NAME = _bt_cfg.get("device_name", "")
 BT_DEVICE_MAC = _bt_cfg.get("device_mac", "")
 BT_POLL_INTERVAL = _bt_cfg.get("poll_interval", 5)
 
-# --- Настройки окна (стартовые) ---
-START_WINDOW_SIZE = (300, 100)
+# --- Окно (сохранённые или дефолтные) ---
+_win_cfg = _config.get("window", {})
+START_WINDOW_SIZE = (_win_cfg.get("width", 300), _win_cfg.get("height", 100))
+START_WINDOW_POS = (_win_cfg.get("x", 0), _win_cfg.get("y", 0))
+START_ALPHA = _win_cfg.get("alpha", 230)
 SMOOTH_WINDOW = 20
 
 POINT_RADIUS_RAW = 1
@@ -269,6 +292,330 @@ class PingerThread(QThread):
                 ms -= step
 
 
+def _list_paired_bt_audio() -> list[tuple[str, str, int]]:
+    """Return list of (name, mac_str, battery) for paired BT audio devices.
+    battery is 0-100 or -1 if unknown."""
+    import subprocess
+    cmd = (
+        "Get-PnpDevice -Class Bluetooth | Where-Object {"
+        " $_.InstanceId -like 'BTHENUM\\DEV_*' -and $_.Status -eq 'OK' } |"
+        " ForEach-Object {"
+        " $mac = ($_.InstanceId -split '_' | Select-Object -Last 1) -replace 'BLUETOOTHDEVICE_','';"
+        " $fn = $_.FriendlyName;"
+        " $bat = -1;"
+        " $hfp = Get-PnpDevice | Where-Object {"
+        "   $_.InstanceId -like \"*0000111E*$mac*\" } | Select-Object -First 1;"
+        " if ($hfp) {"
+        "   $p = Get-PnpDeviceProperty -InstanceId $hfp.InstanceId"
+        "     -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2';"
+        "   if ($p.Data -ne $null) { $bat = $p.Data } };"
+        " \"$fn|$mac|$bat\" }"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        devices = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) >= 3:
+                name = parts[0].strip()
+                mac = parts[1].strip().upper()
+                try:
+                    bat = int(parts[2].strip())
+                except ValueError:
+                    bat = -1
+                if len(mac) == 12:
+                    formatted = ":".join(mac[i:i+2] for i in range(0, 12, 2))
+                    devices.append((name, formatted, bat))
+        return devices
+    except Exception:
+        return []
+
+
+DARK_STYLE = """
+    QDialog, QWidget#settingsInner {
+        background-color: #16161E;
+        color: #B4B4B4;
+        font-family: Consolas;
+        font-size: 12px;
+    }
+    QLabel { color: #B4B4B4; }
+    QLineEdit, QComboBox {
+        background-color: #1E1E2A;
+        color: #E0E0E0;
+        border: 1px solid #333;
+        border-radius: 4px;
+        padding: 4px 6px;
+    }
+    QLineEdit:focus, QComboBox:focus {
+        border-color: #00FF00;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 20px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #1E1E2A;
+        color: #E0E0E0;
+        selection-background-color: #00AA00;
+    }
+    QPushButton {
+        background-color: #1E1E2A;
+        color: #00DD00;
+        border: 1px solid #00AA00;
+        border-radius: 4px;
+        padding: 6px 16px;
+        font-weight: bold;
+    }
+    QPushButton:hover {
+        background-color: #00AA00;
+        color: #000000;
+    }
+    QPushButton#btnCancel {
+        color: #888;
+        border-color: #444;
+    }
+    QPushButton#btnCancel:hover {
+        background-color: #444;
+        color: #FFF;
+    }
+"""
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("PingWave — Настройки")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(440)
+        self.setStyleSheet(DARK_STYLE)
+        self._old_pos = None
+        self._result_cfg = None
+
+        inner = QWidget(self)
+        inner.setObjectName("settingsInner")
+        inner.setStyleSheet(
+            "#settingsInner { background-color: #16161E;"
+            " border: 1px solid #00AA00; border-radius: 10px; }"
+        )
+
+        form = QFormLayout()
+        form.setContentsMargins(20, 20, 20, 16)
+        form.setSpacing(10)
+
+        # Title
+        title = QLabel("Настройки")
+        title.setStyleSheet("color: #00FF00; font-size: 14px; font-weight: bold;")
+        form.addRow(title)
+
+        # BT device
+        self.combo_bt = QComboBox()
+        self.combo_bt.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.combo_bt.setMinimumWidth(280)
+        self.combo_bt.addItem("(нет)", "")
+        self._bt_devices = sorted(_list_paired_bt_audio(), key=lambda x: x[0].lower())
+        current_mac = BT_DEVICE_MAC.upper().replace(":", "")
+        selected_idx = 0
+        for i, (name, mac, bat) in enumerate(self._bt_devices):
+            bat_str = f"{bat}%" if bat >= 0 else "—%"
+            self.combo_bt.addItem(f"{name}  [{mac}]  {bat_str}", mac)
+            # Color battery in the dropdown
+            if bat >= 0:
+                color = self._battery_color(bat)
+                self.combo_bt.setItemData(i + 1, QColor(color), Qt.ForegroundRole)
+            if mac.replace(":", "") == current_mac:
+                selected_idx = i + 1
+        self.combo_bt.setCurrentIndex(selected_idx)
+        form.addRow("Наушники:", self.combo_bt)
+
+        # Ping host
+        self.edit_host = QLineEdit(TARGET_HOST)
+        form.addRow("Хост пинга:", self.edit_host)
+
+        # Ping interval with +/- buttons
+        interval_row = QHBoxLayout()
+        interval_row.setSpacing(4)
+        spin_style = (
+            "QPushButton#spinBtn { font-family: Consolas; font-size: 16px; font-weight: bold;"
+            " background-color: #1E1E2A; color: #00DD00;"
+            " border: 1px solid #00AA00; border-radius: 4px; padding: 0px; }"
+            "QPushButton#spinBtn:hover { background-color: #00AA00; color: #000; }"
+        )
+        btn_minus = QPushButton("-")
+        btn_minus.setObjectName("spinBtn")
+        btn_minus.setFixedSize(28, 28)
+        btn_minus.setStyleSheet(spin_style)
+        btn_minus.clicked.connect(lambda: self._adjust_interval(-0.1))
+        interval_row.addWidget(btn_minus)
+        self.edit_interval = QLineEdit(str(PING_INTERVAL))
+        self.edit_interval.setFixedWidth(60)
+        self.edit_interval.setAlignment(Qt.AlignCenter)
+        interval_row.addWidget(self.edit_interval)
+        btn_plus = QPushButton("+")
+        btn_plus.setObjectName("spinBtn")
+        btn_plus.setFixedSize(28, 28)
+        btn_plus.setStyleSheet(spin_style)
+        btn_plus.clicked.connect(lambda: self._adjust_interval(0.1))
+        interval_row.addWidget(btn_plus)
+        interval_row.addStretch()
+        form.addRow("Интервал (сек):", interval_row)
+
+        # Checkbox: save window position
+        self.chk_save_pos = QCheckBox("Сохранить позицию и размер окна")
+        self.chk_save_pos.setStyleSheet(
+            "QCheckBox { color: #888; font-size: 11px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+            "QCheckBox::indicator:unchecked { border: 1px solid #555; background: #1E1E2A; border-radius: 2px; }"
+            "QCheckBox::indicator:checked { border: 1px solid #00AA00; background: #00AA00; border-radius: 2px; }"
+        )
+        form.addRow(self.chk_save_pos)
+
+        # Buttons: reset | cancel | save
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        btn_reset = QPushButton("По умолчанию")
+        btn_reset.setObjectName("btnCancel")
+        btn_reset.setToolTip("Сбросить все настройки")
+        btn_reset.clicked.connect(self._on_reset)
+        btn_row.addWidget(btn_reset)
+
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("btnCancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_save = QPushButton("Сохранить")
+        btn_save.clicked.connect(self._on_save)
+        btn_row.addWidget(btn_save)
+
+        form.addRow(btn_row)
+
+        inner.setLayout(form)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(inner)
+
+    @staticmethod
+    def _battery_color(battery: int) -> str:
+        if battery >= 50:
+            t = (battery - 50) / 50.0
+            r = int(255 * (1 - t))
+            g = int(255 * t + 204 * (1 - t))
+            b = 0
+        elif battery >= 10:
+            t = (battery - 10) / 40.0
+            r = 255
+            g = int(204 * t + 68 * (1 - t))
+            b = int(68 * (1 - t))
+        else:
+            r, g, b = 255, 68, 68
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _adjust_interval(self, delta):
+        try:
+            val = float(self.edit_interval.text())
+        except ValueError:
+            val = 0.5
+        val = round(max(0.1, val + delta), 1)
+        self.edit_interval.setText(str(val))
+
+    def _on_reset(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Сброс настроек")
+        msg.setText("Сбросить все настройки по умолчанию?")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        msg.setStyleSheet(
+            "QMessageBox { background-color: #16161E; color: #B4B4B4;"
+            " font-family: Consolas; font-size: 12px; }"
+            "QLabel { color: #B4B4B4; }"
+            "QPushButton { background-color: #1E1E2A; color: #00DD00;"
+            " border: 1px solid #00AA00; border-radius: 4px;"
+            " padding: 4px 16px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #00AA00; color: #000; }"
+        )
+        if msg.exec() != QMessageBox.Yes:
+            return
+        # Сбросить окно родителя
+        p = self.parent()
+        if p:
+            p.move(0, 0)
+            p.resize(300, 100)
+            p.current_alpha = 230
+            p.update()
+        # Сохранить дефолтный конфиг (без секции window)
+        cfg = {
+            "ping": {"host": "google.com", "interval": 0.5, "timeout": 1.0},
+            "bluetooth": {"device_name": "", "device_mac": "", "poll_interval": 5},
+        }
+        self._result_cfg = cfg
+        save_config(cfg)
+        self.accept()
+
+    def _on_save(self):
+        mac = self.combo_bt.currentData() or ""
+        name = ""
+        for n, m, _ in self._bt_devices:
+            if m == mac:
+                name = n
+                break
+
+        host = self.edit_host.text().strip() or "google.com"
+        try:
+            interval = float(self.edit_interval.text())
+        except ValueError:
+            interval = 0.5
+
+        cfg = {
+            "ping": {
+                "host": host,
+                "interval": interval,
+                "timeout": ICMP_TIMEOUT,
+            },
+            "bluetooth": {
+                "device_name": name,
+                "device_mac": mac,
+                "poll_interval": BT_POLL_INTERVAL,
+            },
+        }
+
+        p = self.parent()
+        if self.chk_save_pos.isChecked() and p:
+            cfg["window"] = {
+                "x": p.pos().x(),
+                "y": p.pos().y(),
+                "width": p.width(),
+                "height": p.height(),
+                "alpha": p.current_alpha,
+            }
+        elif _config.get("window"):
+            cfg["window"] = _config["window"]
+
+        self._result_cfg = cfg
+        save_config(cfg)
+        self.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._old_pos = event.globalPosition().toPoint()
+
+    def mouseMoveEvent(self, event):
+        if self._old_pos:
+            delta = event.globalPosition().toPoint() - self._old_pos
+            self.move(self.pos() + delta)
+            self._old_pos = event.globalPosition().toPoint()
+
+    def mouseReleaseEvent(self, event):
+        self._old_pos = None
+
+
 class PingWaveWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -285,8 +632,8 @@ class PingWaveWidget(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-        # НИКАКОЙ общей прозрачности окна
-        self.current_alpha = COLOR_BG.alpha()  # стартуем с альфой фона
+        # Прозрачность фона (из конфига или дефолт)
+        self.current_alpha = START_ALPHA
         self.setWindowOpacity(1.0)
 
         self.raw_len = self.width()
@@ -370,8 +717,80 @@ class PingWaveWidget(QWidget):
 
         self._old_pos = None
 
-        self.move(0, 0)
+        self.move(*START_WINDOW_POS)
         self._update_controls_pos()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #1E1E2A; color: #B4B4B4;"
+            " border: 1px solid #333; font-family: Consolas; font-size: 12px; }"
+            "QMenu::item:selected { background-color: #00AA00; color: #000; }"
+        )
+        act_settings = menu.addAction("Настройки...")
+        menu.addSeparator()
+        act_close = menu.addAction("Закрыть")
+        action = menu.exec(event.globalPos())
+        if action == act_settings:
+            self._open_settings()
+        elif action == act_close:
+            self.close()
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.Accepted and dlg._result_cfg:
+            # Apply requires restart for ping thread / BT monitor
+            global TARGET_HOST, PING_INTERVAL, BT_DEVICE_MAC, BT_DEVICE_NAME
+            cfg = dlg._result_cfg
+            new_host = cfg["ping"]["host"]
+            new_interval = cfg["ping"]["interval"]
+            new_mac = cfg["bluetooth"]["device_mac"]
+
+            need_restart = (
+                new_host != TARGET_HOST
+                or new_interval != PING_INTERVAL
+                or new_mac != BT_DEVICE_MAC
+            )
+
+            TARGET_HOST = new_host
+            PING_INTERVAL = new_interval
+            BT_DEVICE_MAC = new_mac
+            BT_DEVICE_NAME = cfg["bluetooth"]["device_name"]
+
+            if "window" in cfg:
+                w = cfg["window"]
+                self.move(w["x"], w["y"])
+                self.resize(w["width"], w["height"])
+                self.current_alpha = w["alpha"]
+                self.update()
+
+            if need_restart:
+                self._restart_threads()
+
+    def _restart_threads(self):
+        # Stop old threads
+        self.thread.requestInterruption()
+        self.thread.quit()
+        self.thread.wait(3000)
+        if self.bt_monitor:
+            self.bt_monitor.requestInterruption()
+            self.bt_monitor.quit()
+            self.bt_monitor.wait(3000)
+
+        # Start new ping thread
+        self.thread = PingerThread()
+        self.thread.ping_result.connect(self.on_new_ping)
+        self.thread.start()
+        self.lbl_status.setText(f"Connecting {TARGET_HOST}...")
+
+        # Start new BT monitor
+        if BT_DEVICE_MAC:
+            self.bt_monitor = BluetoothMonitor(BT_DEVICE_MAC)
+            self.bt_monitor.status_updated.connect(self.on_bt_status)
+            self.bt_monitor.start()
+        else:
+            self.bt_monitor = None
+            self.on_bt_status(False, False, -1)
 
     def _update_controls_pos(self):
         top = 5
@@ -703,6 +1122,8 @@ class PingWaveWidget(QWidget):
             self.bt_monitor.quit()
             self.bt_monitor.wait(3000)
         super().closeEvent(event)
+        import os
+        os._exit(0)
 
 
 if __name__ == "__main__":
