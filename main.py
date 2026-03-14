@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDialog, QComboBox, QLineEdit, QCheckBox, QFormLayout, QHBoxLayout,
     QVBoxLayout, QMenu, QMessageBox,
 )
-from PySide6.QtCore import QThread, Signal, Qt, QPoint, QTimer
+from PySide6.QtCore import QThread, Signal, Qt, QPoint, QTimer, QSize
 from PySide6.QtGui import (
     QPainter, QColor, QBrush, QPixmap,
     QShortcut, QKeySequence, QFont, QWheelEvent, QAction,
@@ -292,9 +292,10 @@ class PingerThread(QThread):
                 ms -= step
 
 
-def _list_paired_bt_audio() -> list[tuple[str, str, int]]:
-    """Return list of (name, mac_str, battery) for paired BT audio devices.
-    battery is 0-100 or -1 if unknown."""
+def _list_paired_bt_audio() -> list[tuple[str, str, int, bool, bool]]:
+    """Return list of (name, mac_str, battery, has_hfp, connected) for paired BT audio devices.
+    battery is 0-100 or -1 if unknown. has_hfp = HFP node exists (battery capable).
+    connected = device currently connected (checked via WinRT)."""
     import subprocess
     cmd = (
         "Get-PnpDevice -Class Bluetooth | Where-Object {"
@@ -302,14 +303,14 @@ def _list_paired_bt_audio() -> list[tuple[str, str, int]]:
         " ForEach-Object {"
         " $mac = ($_.InstanceId -split '_' | Select-Object -Last 1) -replace 'BLUETOOTHDEVICE_','';"
         " $fn = $_.FriendlyName;"
-        " $bat = -1;"
+        " $bat = -1; $hasHfp = 0;"
         " $hfp = Get-PnpDevice | Where-Object {"
         "   $_.InstanceId -like \"*0000111E*$mac*\" } | Select-Object -First 1;"
-        " if ($hfp) {"
+        " if ($hfp) { $hasHfp = 1;"
         "   $p = Get-PnpDeviceProperty -InstanceId $hfp.InstanceId"
         "     -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2';"
         "   if ($p.Data -ne $null) { $bat = $p.Data } };"
-        " \"$fn|$mac|$bat\" }"
+        " \"$fn|$mac|$bat|$hasHfp\" }"
     )
     try:
         r = subprocess.run(
@@ -317,22 +318,52 @@ def _list_paired_bt_audio() -> list[tuple[str, str, int]]:
             capture_output=True, text=True, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        devices = []
+        raw_devices = []
         for line in r.stdout.strip().splitlines():
             parts = line.split("|")
-            if len(parts) >= 3:
+            if len(parts) >= 4:
                 name = parts[0].strip()
                 mac = parts[1].strip().upper()
                 try:
                     bat = int(parts[2].strip())
                 except ValueError:
                     bat = -1
+                has_hfp = parts[3].strip() == "1"
                 if len(mac) == 12:
                     formatted = ":".join(mac[i:i+2] for i in range(0, 12, 2))
-                    devices.append((name, formatted, bat))
+                    raw_devices.append((name, formatted, bat, has_hfp))
+        # Check connection status via WinRT
+        loop = asyncio.new_event_loop()
+        try:
+            devices = loop.run_until_complete(_check_bt_connections(raw_devices))
+        finally:
+            loop.close()
         return devices
     except Exception:
         return []
+
+
+async def _check_bt_connections(
+    raw_devices: list[tuple[str, str, int, bool]],
+) -> list[tuple[str, str, int, bool, bool]]:
+    """Check connection status for each device via WinRT."""
+    import winrt.windows.devices.bluetooth as bt
+
+    results = []
+    for name, mac, battery, has_hfp in raw_devices:
+        connected = False
+        try:
+            mac_int = int(mac.replace(":", ""), 16)
+            device = await bt.BluetoothDevice.from_bluetooth_address_async(mac_int)
+            if device:
+                connected = (
+                    device.connection_status == bt.BluetoothConnectionStatus.CONNECTED
+                )
+                device.close()
+        except Exception:
+            pass
+        results.append((name, mac, battery, has_hfp, connected))
+    return results
 
 
 DARK_STYLE = """
@@ -385,8 +416,86 @@ DARK_STYLE = """
 """
 
 
-class SettingsDialog(QDialog):
+class BtLoaderThread(QThread):
+    """Background thread that loads paired BT audio devices."""
+    finished = Signal(list)
+
+    def run(self):
+        devices = _list_paired_bt_audio()
+        self.finished.emit(devices)
+
+
+class LoadingDialog(QDialog):
+    """Small spinner dialog shown while BT devices are being loaded."""
+
     def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(280, 70)
+
+        inner = QWidget(self)
+        inner.setObjectName("loadingInner")
+        inner.setStyleSheet(
+            "#loadingInner { background-color: #16161E;"
+            " border: 1px solid #00AA00; border-radius: 10px; }"
+        )
+
+        lay = QHBoxLayout(inner)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(12)
+
+        self._spinner_label = QLabel(self)
+        self._spinner_label.setFixedSize(20, 20)
+        self._spinner_angle = 0
+        lay.addWidget(self._spinner_label)
+
+        msg = QLabel("Получаем Bluetooth устройства...")
+        msg.setStyleSheet(
+            "color: #B4B4B4; font-family: Consolas; font-size: 12px;"
+        )
+        lay.addWidget(msg)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(inner)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._rotate)
+        self._timer.start(80)
+
+        # Center on parent
+        if parent:
+            pg = parent.geometry()
+            self.move(
+                pg.x() + (pg.width() - self.width()) // 2,
+                pg.y() + (pg.height() - self.height()) // 2,
+            )
+
+    def _rotate(self):
+        self._spinner_angle = (self._spinner_angle + 30) % 360
+        self._spinner_label.update()
+        size = 20
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy = size // 2, size // 2
+        import math
+        for i in range(12):
+            angle = math.radians(self._spinner_angle + i * 30)
+            alpha = int(255 * (1.0 - i / 12.0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(0, 220, 0, alpha)))
+            x = cx + int(7 * math.cos(angle)) - 2
+            y = cy - int(7 * math.sin(angle)) - 2
+            p.drawEllipse(x, y, 4, 4)
+        p.end()
+        self._spinner_label.setPixmap(pix)
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, bt_devices=None):
         super().__init__(parent)
         self.setWindowTitle("PingWave — Настройки")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -417,16 +526,27 @@ class SettingsDialog(QDialog):
         self.combo_bt.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.combo_bt.setMinimumWidth(280)
         self.combo_bt.addItem("(нет)", "")
-        self._bt_devices = sorted(_list_paired_bt_audio(), key=lambda x: x[0].lower())
+        self._bt_devices = sorted(bt_devices or [], key=lambda x: x[0].lower())
         current_mac = BT_DEVICE_MAC.upper().replace(":", "")
         selected_idx = 0
-        for i, (name, mac, bat) in enumerate(self._bt_devices):
-            bat_str = f"{bat}%" if bat >= 0 else "—%"
-            self.combo_bt.addItem(f"{name}  [{mac}]  {bat_str}", mac)
-            # Color battery in the dropdown
-            if bat >= 0:
+        for i, (name, mac, bat, has_hfp, connected) in enumerate(self._bt_devices):
+            if connected and bat >= 0:
+                bat_str = f"  {bat}%"
+            elif has_hfp:
+                bat_str = "  (бат.)"
+            else:
+                bat_str = ""
+            label = f"{name}  [{mac}]{bat_str}"
+            self.combo_bt.addItem(label, mac)
+            # Color: connected devices bright, disconnected dim
+            if connected and bat >= 0:
                 color = self._battery_color(bat)
                 self.combo_bt.setItemData(i + 1, QColor(color), Qt.ForegroundRole)
+            elif connected:
+                self.combo_bt.setItemData(i + 1, QColor("#E0E0E0"), Qt.ForegroundRole)
+            else:
+                # Disconnected — dim gray
+                self.combo_bt.setItemData(i + 1, QColor("#555"), Qt.ForegroundRole)
             if mac.replace(":", "") == current_mac:
                 selected_idx = i + 1
         self.combo_bt.setCurrentIndex(selected_idx)
@@ -562,9 +682,9 @@ class SettingsDialog(QDialog):
     def _on_save(self):
         mac = self.combo_bt.currentData() or ""
         name = ""
-        for n, m, _ in self._bt_devices:
-            if m == mac:
-                name = n
+        for dev in self._bt_devices:
+            if dev[1] == mac:
+                name = dev[0]
                 break
 
         host = self.edit_host.text().strip() or "google.com"
@@ -737,9 +857,21 @@ class PingWaveWidget(QWidget):
             self.close()
 
     def _open_settings(self):
-        dlg = SettingsDialog(self)
+        # Show loading spinner while BT devices are being enumerated
+        self._loading_dlg = LoadingDialog(self)
+        self._loading_dlg.show()
+
+        self._bt_loader = BtLoaderThread()
+        self._bt_loader.finished.connect(self._on_bt_loaded)
+        self._bt_loader.start()
+
+    def _on_bt_loaded(self, bt_devices):
+        self._loading_dlg.close()
+        self._loading_dlg = None
+        self._bt_loader = None
+
+        dlg = SettingsDialog(self, bt_devices=bt_devices)
         if dlg.exec() == QDialog.Accepted and dlg._result_cfg:
-            # Apply requires restart for ping thread / BT monitor
             global TARGET_HOST, PING_INTERVAL, BT_DEVICE_MAC, BT_DEVICE_NAME
             cfg = dlg._result_cfg
             new_host = cfg["ping"]["host"]
